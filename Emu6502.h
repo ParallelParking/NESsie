@@ -108,6 +108,20 @@ public:
     uint8_t TXS(); // Transfer index X to stack pointer
     uint8_t TYA(); // Transfer index Y to accumulator
 
+    uint8_t XXX(); // Illegal opcode catchment
+
+    void clock();
+    void reset();
+    void irq(); // Interrupt request handler
+    void nmi(); // Non-maskable interrupt
+
+    uint8_t fetch();
+    uint8_t fetched = 0x00;
+
+    uint16_t absoluteAddress = 0x0000;
+    uint8_t relativeAddress = 0x00; // Branching has a range limit on 6502
+    uint8_t opcode = 0x00;
+    uint8_t cycles = 0;
 private:
     Bus* bus = nullptr; // forward declaration of Bus (see: https://en.wikipedia.org/wiki/Forward_declaration)
 
