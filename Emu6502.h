@@ -5,7 +5,9 @@
 #ifndef EMU6502_H
 #define EMU6502_H
 #include <cstdint>
-#include "bus.h"
+#include <string>
+#include <vector>
+
 class Bus;
 
 class Emu6502 {
@@ -129,7 +131,16 @@ private:
     void write(uint16_t address, uint8_t data);
 
     [[nodiscard]] uint8_t getFlag(FLAGS6502 flag) const;
-    void setFlag(FLAGS6502 flag);
+    void setFlag(FLAGS6502 flag, bool v);
+
+    struct INSTRUCTION {
+        std::string name;
+        uint8_t (Emu6502::*operate)() = nullptr; // function pointer to opcodes
+        uint8_t (Emu6502::*addressingMode)() = nullptr; // function pointer to addressing mode
+        uint8_t cycles = 0;
+    };
+
+    std::vector<INSTRUCTION> lookup;
 };
 
 
