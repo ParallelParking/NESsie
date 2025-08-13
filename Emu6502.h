@@ -31,7 +31,7 @@ public:
     uint8_t y = 0x00; // Y register
     uint8_t stkp = 0x00; // Stack pointer (points to location on bus)
     uint16_t pc = 0x0000; // Program Counter
-    uint8_t status = 0x00; // Status register
+    uint8_t status = 0x00; // Status register [CZIDBUVN]
 
     void connectBus(Bus* bus) {
         this->bus = bus;

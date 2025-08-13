@@ -4,6 +4,8 @@
 
 #include "Emu6502.h"
 
+#include <bits/atomic_lockfree_defines.h>
+
 #include "Bus.h"
 
 Emu6502::Emu6502() {
@@ -31,6 +33,9 @@ Emu6502::Emu6502() {
 
 Emu6502::~Emu6502() = default;
 
+///////////////////////////////////////////////////////////
+/// BUS CONNECTIVITY
+
 uint8_t Emu6502::read(uint16_t address) const {
     return bus->read(address, false);
 }
@@ -38,6 +43,22 @@ uint8_t Emu6502::read(uint16_t address) const {
 // ReSharper disable once CppMemberFunctionMayBeConst
 void Emu6502::write(uint16_t address, uint8_t data) {
     return bus->write(address, data);
+}
+
+void Emu6502::clock() {
+	if (cycles == 0) {
+		opcode = read(pc);
+		pc++;
+		cycles = lookup[opcode].cycles;
+
+		// The return value here handles the caveat, on execution of the addr. mode and operation functions,
+		// that sometimes an additional clock cycle will be needed. These vars handle this eventuality.
+		const uint8_t needsAdditionalCycle1 = (this->*lookup[opcode].addressingMode)();
+		const uint8_t needsAdditionalCycle2 = (this->*lookup[opcode].operate)();
+		cycles += (needsAdditionalCycle1 & needsAdditionalCycle2);
+	}
+
+	cycles--;
 }
 
 uint8_t Emu6502::getFlag(const FLAGS6502 flag) const {
@@ -51,6 +72,9 @@ void Emu6502::setFlag(const FLAGS6502 flag, const bool v) {
 	    status &= ~flag;
     }
 }
+
+///////////////////////////////////////////////////////////
+/// ADDRESSING MODES
 
 // IMPLIED: Address of operand is implicitly stated in opcode of instruction
 // However, certain ops using IMP use accumulator data.
@@ -182,14 +206,13 @@ uint8_t Emu6502::IZX() {
 
 	const uint16_t lo = read(static_cast<uint16_t>(address + static_cast<uint16_t>(x)) & 0x00FF);
 	const uint16_t hi = read(static_cast<uint16_t>(address + static_cast<uint16_t>(x) + 1) & 0x00FF);
-
 	absoluteAddress = (hi << 8) | lo;
 
 	return 0;
 }
 
 // INDIRECT ZERO PAGE Y INDEXED: Behaves differently from IZX, weirdly
-// Mem. loc. provided on zero page address, this loc. is then offset by Y.
+// Mem. loc. provided on zero-page address, this loc. is then offset by Y.
 uint8_t Emu6502::IZY() {
 	const uint16_t address = read(pc);
 	pc++;
@@ -206,19 +229,144 @@ uint8_t Emu6502::IZY() {
 	return 0;
 }
 
-void Emu6502::clock() {
-	if (cycles == 0) {
-		opcode = read(pc);
-		pc++;
-		cycles = lookup[opcode].cycles;
+uint8_t Emu6502::fetch() {
+	if (lookup[opcode].addressingMode != &Emu6502::IMP) {
+		fetched = read(absoluteAddress);
+	}
+	return fetched;
+}
 
-		// The return value here handles the caveat, on execution of the addr. mode and operation functions,
-		// that sometimes an additional clock cycle will be needed. These vars handle this eventuality.
-		const uint8_t needsAdditionalCycle1 = (this->*lookup[opcode].addressingMode)();
-		const uint8_t needsAdditionalCycle2 = (this->*lookup[opcode].operate)();
-		cycles += (needsAdditionalCycle1 & needsAdditionalCycle2);
+///////////////////////////////////////////////////////////
+/// INSTRUCTIONS
+
+// ADD WITH CARRY: A <- A + M + C [NVZC]
+uint8_t Emu6502::ADC() {
+	fetch();
+	const uint16_t temp = static_cast<uint16_t>(a) + static_cast<uint16_t>(fetched) + static_cast<uint16_t>(getFlag(C));
+
+	setFlag(N, temp & 0x80);
+	setFlag(V, ((static_cast<uint16_t>(a) ^ static_cast<uint16_t>(temp)) & ~(static_cast<uint16_t>(a) ^ static_cast<uint16_t>(fetched))) & 0x80);
+	setFlag(Z, (temp & 0x00FF) == 0);
+	setFlag(C, temp > 255);
+
+	a = temp & 0x00FF;
+
+	return 1;
+}
+
+
+// AND: A <- A AND M [NZ]
+uint8_t Emu6502::AND() {
+	fetch();
+	a = a & fetched;
+
+	setFlag(N, a & 0x80);
+	setFlag(Z, a == 0x00);
+
+	return 1; // can potentially use additional cycle
+}
+
+// SHIFT BIT LEFT: C <- M[7 <-- 0] <- 0
+uint8_t Emu6502::ASL() {
+	fetch();
+	const uint16_t temp = static_cast<uint16_t>(fetched) << 1;
+
+	setFlag(N, temp & 0x80);
+	setFlag(Z, (temp & 0x00FF) == 0);
+	setFlag(C, (temp & 0xFF00) > 0);
+
+	if (lookup[opcode].addressingMode == &Emu6502::IMP) {
+		a = temp & 0x00FF;
+	} else {
+		write(absoluteAddress, temp & 0x00FF);
 	}
 
-	cycles--;
+	return 1;
 }
+
+uint8_t Emu6502::BCC() {
+	if (getFlag(C) == 0) {
+		cycles++;
+		absoluteAddress = pc + relativeAddress;
+		if ((absoluteAddress & 0xFF00) != (pc & 0xFF00)) {
+			cycles++;
+		}
+		pc = absoluteAddress;
+	}
+	return 0;
+}
+
+uint8_t Emu6502::BCS() {
+	if (getFlag(C) == 1) {
+		cycles++;
+		absoluteAddress = pc + relativeAddress;
+		if ((absoluteAddress & 0xFF00) != (pc & 0xFF00)) {
+			cycles++;
+		}
+		pc = absoluteAddress;
+	}
+	return 0;
+}
+
+uint8_t Emu6502::BEQ() {
+	if (getFlag(Z) == 1) {
+		cycles++;
+		absoluteAddress = pc + relativeAddress;
+		if ((absoluteAddress & 0xFF00) != (pc & 0xFF00)) {
+			cycles++;
+		}
+		pc = absoluteAddress;
+	}
+	return 0;
+}
+
+uint8_t Emu6502::BIT() {
+	fetch();
+	const uint8_t temp = a & fetched;
+
+	setFlag(N, fetched & (1 << 7));
+	setFlag(V, fetched & (1 << 6));
+	setFlag(Z, temp == 0x00);
+
+	return 0;
+}
+
+uint8_t Emu6502::BMI() {
+	if (getFlag(N) == 1) {
+		cycles++;
+		absoluteAddress = pc + relativeAddress;
+		if ((absoluteAddress & 0xFF00) != (pc & 0xFF00)) {
+			cycles++;
+		}
+		pc = absoluteAddress;
+	}
+	return 0;
+}
+
+uint8_t Emu6502::BNE() {
+	if (getFlag(Z) == 0) {
+		cycles++;
+		absoluteAddress = pc + relativeAddress;
+		if ((absoluteAddress & 0xFF00) != (pc & 0xFF00)) {
+			cycles++;
+		}
+		pc = absoluteAddress;
+	}
+	return 0;
+}
+
+uint8_t Emu6502::BPL() {
+	if (getFlag(N) == 0) {
+		cycles++;
+		absoluteAddress = pc + relativeAddress;
+		if ((absoluteAddress & 0xFF00) != (pc & 0xFF00)) {
+			cycles++;
+		}
+		pc = absoluteAddress;
+	}
+	return 0;
+}
+
+// IMPLEMENT BRK LATER
+
 
